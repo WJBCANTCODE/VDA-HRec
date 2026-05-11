@@ -1,2 +1,2 @@
 # VDA-HRec
-Soon or later
+The model code has been open-sourced

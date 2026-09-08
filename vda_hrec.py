@@ -21,29 +21,59 @@ class GlobalHypergraphRefiner(nn.Module):
 class HyperConv(nn.Module):
     def __init__(self, layers, emb_size, k_hops=2):
         super().__init__()
+
         self.emb_size = emb_size
         self.layers = layers
         self.k_hops = k_hops
-        self.var_weight = 1e-5
-    def compute_feature_variance(self, x):
+        self.deviation_weight = 1e-5
+        self.eps = 1e-8
+        self.channel_scale = nn.Parameter(
+            torch.ones(1, emb_size)
+        )
+
+    def compute_node_channel_deviation(self, x):
         global_mean = x.mean(dim=0, keepdim=True)  # [1, D]
-        global_var = x.var(dim=0, keepdim=True, unbiased=True)  # [1, D]
-        node_dim_var = (x - global_mean) **2
-        global_var = torch.clamp(global_var, min=1e-8) 
-        node_dim_var_norm = node_dim_var / global_var
-        return node_dim_var_norm
+        global_var = x.var(
+            dim=0,
+            keepdim=True,
+            unbiased=False
+        ).clamp_min(self.eps)  # [1, D]
+
+        z_score = (x - global_mean) / torch.sqrt(global_var)
+        signed_deviation = z_score * torch.abs(z_score)
+
+        return signed_deviation
+
     def forward(self, adjacency, embedding):
-        item_embeddings = embedding  # [N, D]
-        final = [item_embeddings]
+        node_embeddings = embedding  # [N, D]
+        final_embeddings = [node_embeddings]
+
         adjacency = adjacency.to(embedding.device)
-        var_features = self.compute_feature_variance(item_embeddings)
-        for i in range(self.layers):
-            for hop in range(self.k_hops):
-                item_embeddings = torch.sparse.mm(adjacency, item_embeddings)
-                item_embeddings = item_embeddings + self.var_weight * var_features     
-            final.append(item_embeddings)
-        item_embeddings = torch.sum(torch.stack(final), 0) / (self.layers + 1)  
-        return item_embeddings
+        deviation_anchor = self.compute_node_channel_deviation(
+            node_embeddings
+        )
+
+        for _ in range(self.layers):
+            for _ in range(self.k_hops):
+                node_embeddings = torch.sparse.mm(
+                    adjacency,
+                    node_embeddings
+                )
+                node_embeddings = (
+                    node_embeddings
+                    + self.deviation_weight
+                    * self.channel_scale
+                    * deviation_anchor
+                )
+
+            final_embeddings.append(node_embeddings)
+
+        node_embeddings = torch.stack(
+            final_embeddings,
+            dim=0
+        ).mean(dim=0)
+
+        return node_embeddings
 
 class VDA_HRec(GeneralRecommender):
     def __init__(self, config, dataset):
